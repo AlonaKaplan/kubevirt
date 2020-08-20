@@ -36,7 +36,7 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
-	cd "kubevirt.io/kubevirt/tests/containerdisk"
+	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
 var _ = SIGDescribe("Services", func() {
@@ -47,6 +47,34 @@ var _ = SIGDescribe("Services", func() {
 		job, err := virtClient.BatchV1().Jobs(namespace).Create(job)
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 		return job
+	}
+
+	exposeExistingVMISpec := func(vmi *v1.VirtualMachineInstance, subdomain string, hostname string, selectorLabelKey string, selectorLabelValue string) *v1.VirtualMachineInstance {
+		vmi.Labels = map[string]string{selectorLabelKey: selectorLabelValue}
+		vmi.Spec.Subdomain = subdomain
+		vmi.Spec.Hostname = hostname
+
+		return vmi
+	}
+
+	readyVMI := func(vmi *v1.VirtualMachineInstance) *v1.VirtualMachineInstance {
+		_, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+		Expect(err).ToNot(HaveOccurred())
+
+		return tests.WaitUntilVMIReady(vmi, tests.LoggedInCirrosExpecter)
+	}
+
+	cleanupVMI := func(virtClient kubecli.KubevirtClient, vmi *v1.VirtualMachineInstance) {
+		if vmi != nil {
+			By("Deleting the VMI")
+			Expect(virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(vmi.GetName(), &k8smetav1.DeleteOptions{})).To(Succeed())
+
+			By("Waiting for the VMI to be gone")
+			Eventually(func() error {
+				_, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(vmi.GetName(), &k8smetav1.GetOptions{})
+				return err
+			}, 2*time.Minute, time.Second).Should(SatisfyAll(HaveOccurred(), WithTransform(errors.IsNotFound, BeTrue())), "The VMI should be gone within the given timeout")
+		}
 	}
 
 	BeforeEach(func() {
@@ -65,35 +93,28 @@ var _ = SIGDescribe("Services", func() {
 			servicePort        = 1500
 		)
 
+		createVMISpecWithBridgeInterface := func(vmi *v1.VirtualMachineInstance) *v1.VirtualMachineInstance {
+			return libvmi.NewCirros(
+				libvmi.WithInterface(libvmi.InterfaceDeviceWithBridgeBinding()),
+				libvmi.WithNetwork(v1.DefaultPodNetwork()))
+		}
+
+		createReadyVMIWithBridgeBindingAndExposedService := func(hostname string, subdomain string) *v1.VirtualMachineInstance {
+			return readyVMI(
+				exposeExistingVMISpec(
+					createVMISpecWithBridgeInterface(nil), subdomain, hostname, selectorLabelKey, selectorLabelValue))
+		}
+
 		BeforeEach(func() {
-			// inboundVMI expects implicitly to be added to the pod network
-			inboundVMI = tests.NewRandomVMIWithEphemeralDiskAndUserdata(cd.ContainerDiskFor(cd.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
-			inboundVMI.Labels = map[string]string{selectorLabelKey: selectorLabelValue}
-			inboundVMI.Spec.Subdomain = "vmi"
-			inboundVMI.Spec.Hostname = "inbound"
-			// Remove the masquerade interface to use the default bridge one
-			inboundVMI.Spec.Domain.Devices.Interfaces = nil
-			inboundVMI.Spec.Networks = nil
+			subdomain := "vmi"
+			hostname := "inbound"
 
-			_, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(inboundVMI)
-			Expect(err).ToNot(HaveOccurred())
-
-			inboundVMI = tests.WaitUntilVMIReady(inboundVMI, tests.LoggedInCirrosExpecter)
-
+			inboundVMI = createReadyVMIWithBridgeBindingAndExposedService(hostname, subdomain)
 			tests.StartTCPServer(inboundVMI, servicePort)
 		})
 
 		AfterEach(func() {
-			if inboundVMI != nil {
-				By("Deleting the VMI")
-				Expect(virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Delete(inboundVMI.GetName(), &k8smetav1.DeleteOptions{})).To(Succeed())
-
-				By("Waiting for the VMI to be gone")
-				Eventually(func() error {
-					_, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Get(inboundVMI.GetName(), &k8smetav1.GetOptions{})
-					return err
-				}, 2*time.Minute, time.Second).Should(SatisfyAll(HaveOccurred(), WithTransform(errors.IsNotFound, BeTrue())), "The VMI should be gone within the given timeout")
-			}
+			cleanupVMI(virtClient, inboundVMI)
 		})
 
 		Context("with a service matching the vmi exposed", func() {

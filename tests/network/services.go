@@ -36,6 +36,7 @@ import (
 	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
+	"kubevirt.io/kubevirt/tests/flags"
 	"kubevirt.io/kubevirt/tests/libvmi"
 )
 
@@ -170,11 +171,112 @@ var _ = SIGDescribe("Services", func() {
 			})
 		})
 	})
+
+	Context("Masquerade interface binding", func() {
+		var inboundVMI *v1.VirtualMachineInstance
+		var serviceName string
+
+		const (
+			selectorLabelKey   = "expose"
+			selectorLabelValue = "me"
+			servicePort        = 1500
+		)
+
+		createReadyVMIWithMasqueradeBindingAndExposedService := func(hostname string, subdomain string) *v1.VirtualMachineInstance {
+			vmi := libvmi.NewCirros(
+				libvmi.WithInterface(libvmi.InterfaceDeviceWithMasqueradeBinding()),
+				libvmi.WithNetwork(v1.DefaultPodNetwork()))
+			return readyVMI(
+				exposeExistingVMISpec(vmi, subdomain, hostname, selectorLabelKey, selectorLabelValue))
+		}
+
+		BeforeEach(func() {
+			subdomain := "vmi"
+			hostname := "inbound"
+
+			inboundVMI = createReadyVMIWithMasqueradeBindingAndExposedService(hostname, subdomain)
+
+			tests.StartTCPServer(inboundVMI, servicePort)
+		})
+
+		Context("with a service matching the vmi exposed", func() {
+			var isDualStack bool
+			var ipv6ServiceName string
+
+			BeforeEach(func() {
+				serviceName = "myservice"
+
+				service := buildServiceSpec(serviceName, servicePort, servicePort, selectorLabelKey, selectorLabelValue)
+				_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
+				Expect(err).ToNot(HaveOccurred())
+
+				isDualStack = flags.IsDualStackedNetworkConfig
+				if isDualStack {
+					ipv6ServiceName = serviceName + "v6"
+
+					service := buildIPv6ServiceSpec(ipv6ServiceName, servicePort, servicePort, selectorLabelKey, selectorLabelValue)
+					_, err := virtClient.CoreV1().Services(inboundVMI.Namespace).Create(service)
+					Expect(err).ToNot(HaveOccurred())
+				}
+			})
+
+			AfterEach(func() {
+				Expect(virtClient.CoreV1().Services(inboundVMI.Namespace).Delete(serviceName, &k8smetav1.DeleteOptions{})).To(Succeed())
+			})
+
+			AfterEach(func() {
+				if isDualStack {
+					Expect(virtClient.CoreV1().Services(inboundVMI.Namespace).Delete(ipv6ServiceName, &k8smetav1.DeleteOptions{})).To(Succeed())
+				}
+			})
+
+			It("should be able to reach the vmi based on labels specified on the vmi", func() {
+				By("starting a job which tries to reach the vmi via the defined service")
+				job := runTCPClientExpectingHelloWorldFromServer(fmt.Sprintf("%s.%s", serviceName, inboundVMI.Namespace), strconv.Itoa(servicePort), inboundVMI.Namespace)
+
+				By("waiting for the job to report a successful connection attempt")
+				tests.WaitForJobToSucceed(&virtClient, job, 90)
+
+				if isDualStack {
+					By("starting a job which tries to reach the vmi via the defined ipv6 service")
+					jobv6 := runTCPClientExpectingHelloWorldFromServer(fmt.Sprintf("%s.%s", ipv6ServiceName, inboundVMI.Namespace), strconv.Itoa(servicePort), inboundVMI.Namespace)
+
+					By("waiting for the job to report a successful connection attempt to the ipv6 service")
+					tests.WaitForJobToSucceed(&virtClient, jobv6, 90)
+				}
+			})
+
+			It("should fail to reach the vmi if an invalid servicename is used", func() {
+
+				By("starting a job which tries to reach the vmi via a non-existent service")
+				job := runTCPClientExpectingHelloWorldFromServer(fmt.Sprintf("%s.%s", "wrongservice", inboundVMI.Namespace), strconv.Itoa(servicePort), inboundVMI.Namespace)
+
+				By("waiting for the job to report an  unsuccessful connection attempt")
+				tests.WaitForJobToFail(&virtClient, job, 90)
+
+				if isDualStack {
+					By("starting a job which tries to reach the vmi via the defined ipv6 service")
+					jobv6 := runTCPClientExpectingHelloWorldFromServer(fmt.Sprintf("%s.%s", "wrongservice", inboundVMI.Namespace), strconv.Itoa(servicePort), inboundVMI.Namespace)
+
+					By("waiting for the job to report a successful connection attempt to the ipv6 service")
+					tests.WaitForJobToFail(&virtClient, jobv6, 90)
+				}
+			})
+		})
+	})
 })
 
 func buildHeadlessServiceSpec(serviceName string, exposedPort int, portToExpose int, selectorKey string, selectorValue string) *k8sv1.Service {
 	service := buildServiceSpec(serviceName, exposedPort, portToExpose, selectorKey, selectorValue)
 	service.Spec.ClusterIP = k8sv1.ClusterIPNone
+	return service
+}
+
+func buildIPv6ServiceSpec(serviceName string, exposedPort int, portToExpose int, selectorKey string, selectorValue string) *k8sv1.Service {
+	service := buildServiceSpec(serviceName, exposedPort, portToExpose, selectorKey, selectorValue)
+	ipv6Family := k8sv1.IPv6Protocol
+	service.Spec.IPFamily = &ipv6Family
+
 	return service
 }
 

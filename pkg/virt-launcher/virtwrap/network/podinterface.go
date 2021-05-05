@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -1300,30 +1301,57 @@ func (b *SlirpBindMechanism) generateDomainIfaceSpec() api.Interface {
 	return api.Interface{}
 }
 
+// Passt
 func (b *SlirpBindMechanism) decorateConfig(api.Interface) error {
-	// remove slirp interface from domain spec devices interfaces
-	var foundIfaceModelType string
-	ifaces := b.domain.Spec.Devices.Interfaces
-	for i, iface := range ifaces {
-		if iface.Alias.GetName() == b.iface.Name {
-			b.domain.Spec.Devices.Interfaces = append(ifaces[:i], ifaces[i+1:]...)
-			foundIfaceModelType = iface.Model.Type
-			break
-		}
+	err := downloadPasstBinaries()
+	if err != nil {
+		return err
 	}
 
-	if foundIfaceModelType == "" {
-		return fmt.Errorf("failed to find interface %s in vmi spec", b.iface.Name)
+	output, err := exec.Command("passt").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
 	}
 
-	qemuArg := fmt.Sprintf("%s,netdev=%s,id=%s", foundIfaceModelType, b.iface.Name, b.iface.Name)
-	if b.iface.MacAddress != "" {
-		// We assume address was already validated in API layer so just pass it to libvirt as-is.
-		qemuArg += fmt.Sprintf(",mac=%s", b.iface.MacAddress)
+	return nil
+}
+
+func downloadPasstBinaries() error {
+	//curl -k https://passt.top/builds/static/passt --output /usr/bin/passt
+	output, err := exec.Command("curl", "-k", "https://passt.top/builds/static/passt", "--output", "/usr/bin/passt").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
 	}
-	// Add interface configuration to qemuArgs
-	b.domain.Spec.QEMUCmd.QEMUArg = append(b.domain.Spec.QEMUCmd.QEMUArg, api.Arg{Value: "-device"})
-	b.domain.Spec.QEMUCmd.QEMUArg = append(b.domain.Spec.QEMUCmd.QEMUArg, api.Arg{Value: qemuArg})
+
+	//curl -k https://passt.top/builds/static/qrap --output /usr/bin/qrap
+	output, err = exec.Command("curl", "-k", "https://passt.top/builds/static/qrap", "--output", "/usr/bin/qrap").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
+	}
+
+	//curl -k https://gist.githubusercontent.com/AlonaKaplan/072680bd9d7e438bb90ee0e5a2423825/raw/54a0a59b6bf55465e06324b3cc259366c9f5b39e/gistfile1.txt --output /usr/bin/qrap.sh
+	output, err = exec.Command("curl", "-k", "https://gist.githubusercontent.com/AlonaKaplan/072680bd9d7e438bb90ee0e5a2423825/raw/54a0a59b6bf55465e06324b3cc259366c9f5b39e/gistfile1.txt", "--output", "/usr/bin/qrap.sh").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
+	}
+
+	//chmod +x /usr/bin/passt
+	output, err = exec.Command("chmod", "+x", "/usr/bin/passt").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
+	}
+
+	//chmod +x /usr/bin/qrap
+	output, err = exec.Command("chmod", "+x", "/usr/bin/qrap").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
+	}
+
+	//chmod +x /usr/bin/qrap
+	output, err = exec.Command("chmod", "+x", "/usr/bin/qrap.sh").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", string(output))
+	}
 
 	return nil
 }

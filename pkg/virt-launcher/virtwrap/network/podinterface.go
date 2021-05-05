@@ -20,12 +20,14 @@
 package network
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-iptables/iptables"
 	"github.com/vishvananda/netlink"
@@ -1308,9 +1310,54 @@ func (b *SlirpBindMechanism) decorateConfig(api.Interface) error {
 		return err
 	}
 
-	output, err := exec.Command("passt").CombinedOutput()
+	cmd := exec.Command("/usr/bin/passt")
+	// connect passt's stderr to our own stdout in order to see the logs in the container logs
+	reader, err := cmd.StderrPipe()
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to start passt cmd")
+	}
+
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 1024), 512*1024)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if len(strings.TrimSpace(line)) == 0 {
+				continue
+			}
+			log.Log.Infof(line)
+			time.Sleep(30 * time.Second)
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Log.Reason(err).Errorf("failed to read passt logs")
+		}
+	}()
+
+	err = cmd.Start()
+	// TODO: remove the sleep and change to a while waiting for the /tmp/passt_1.socket
+	time.Sleep(10 * time.Second)
+	if err != nil {
+		log.Log.Reason(err).Errorf("failed to start passt")
+	}
+
+	output, err := exec.Command("ls", "/tmp/passt_1.socket").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s", string(output))
+	}
+
+	// remove passt interface from domain spec devices interfaces
+	foundDomainInterface := false
+	ifaces := b.domain.Spec.Devices.Interfaces
+	for i, iface := range ifaces {
+		if iface.Alias.GetName() == b.iface.Name {
+			b.domain.Spec.Devices.Interfaces = append(ifaces[:i], ifaces[i+1:]...)
+			foundDomainInterface = true
+			break}
+	}
+
+	if !foundDomainInterface {
+		return fmt.Errorf("failed to find interface %s in vmi spec", b.iface.Name)
 	}
 
 	return nil
@@ -1329,12 +1376,6 @@ func downloadPasstBinaries() error {
 		return fmt.Errorf("%s", string(output))
 	}
 
-	//curl -k https://gist.githubusercontent.com/AlonaKaplan/072680bd9d7e438bb90ee0e5a2423825/raw/54a0a59b6bf55465e06324b3cc259366c9f5b39e/gistfile1.txt --output /usr/bin/qrap.sh
-	output, err = exec.Command("curl", "-k", "https://gist.githubusercontent.com/AlonaKaplan/072680bd9d7e438bb90ee0e5a2423825/raw/54a0a59b6bf55465e06324b3cc259366c9f5b39e/gistfile1.txt", "--output", "/usr/bin/qrap.sh").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s", string(output))
-	}
-
 	//chmod +x /usr/bin/passt
 	output, err = exec.Command("chmod", "+x", "/usr/bin/passt").CombinedOutput()
 	if err != nil {
@@ -1343,12 +1384,6 @@ func downloadPasstBinaries() error {
 
 	//chmod +x /usr/bin/qrap
 	output, err = exec.Command("chmod", "+x", "/usr/bin/qrap").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s", string(output))
-	}
-
-	//chmod +x /usr/bin/qrap
-	output, err = exec.Command("chmod", "+x", "/usr/bin/qrap.sh").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s", string(output))
 	}

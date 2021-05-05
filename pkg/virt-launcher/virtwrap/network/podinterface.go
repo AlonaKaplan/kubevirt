@@ -228,6 +228,16 @@ func (l *podNIC) PlugPhase1() error {
 			return err
 		}
 	}
+
+	if l.iface.Slirp != nil {
+		log.Log.Reason(err).Infof("Configuring ping group range")
+		err := l.handler.ConfigurePingGroupRange()
+		if err != nil {
+			log.Log.Reason(err).Errorf("failed to configure ping group range")
+			return err
+		}
+	}
+
 	if !doesExist {
 		bindMechanism, err := l.getPhase1Binding()
 		if err != nil {
@@ -1274,8 +1284,8 @@ func portsUsedByIstio() []string {
 }
 
 type SlirpBindMechanism struct {
-	iface  *v1.Interface
-	domain *api.Domain
+	iface   *v1.Interface
+	domain  *api.Domain
 }
 
 func (b *SlirpBindMechanism) discoverPodNetworkInterface(podIfaceName string) error {

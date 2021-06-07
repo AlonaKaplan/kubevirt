@@ -239,6 +239,12 @@ func (l *podNIC) PlugPhase1() error {
 			log.Log.Reason(err).Errorf("failed to configure ping group range")
 			return err
 		}
+		log.Log.Reason(err).Infof("Configuring fs.file-max on the node")
+		err = l.handler.ConfigureFsFileMax()
+		if err != nil {
+			log.Log.Reason(err).Errorf("failed to configure fs.file-max on the node")
+			return err
+		}
 	}
 
 	if !doesExist {
@@ -1287,8 +1293,8 @@ func portsUsedByIstio() []string {
 }
 
 type SlirpBindMechanism struct {
-	iface   *v1.Interface
-	domain  *api.Domain
+	iface  *v1.Interface
+	domain *api.Domain
 }
 
 func (b *SlirpBindMechanism) discoverPodNetworkInterface(podIfaceName string) error {
@@ -1353,7 +1359,8 @@ func (b *SlirpBindMechanism) decorateConfig(api.Interface) error {
 		if iface.Alias.GetName() == b.iface.Name {
 			b.domain.Spec.Devices.Interfaces = append(ifaces[:i], ifaces[i+1:]...)
 			foundDomainInterface = true
-			break}
+			break
+		}
 	}
 
 	if !foundDomainInterface {

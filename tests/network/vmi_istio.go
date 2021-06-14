@@ -59,7 +59,7 @@ const (
 	istioRestrictedPort = network.EnvoyTunnelPort
 )
 
-var _ = SIGDescribe("[Serial] Istio", func() {
+var _ = SIGDescribe("[Serial] Istio + Passt", func() {
 	var (
 		err        error
 		vmi        *v1.VirtualMachineInstance
